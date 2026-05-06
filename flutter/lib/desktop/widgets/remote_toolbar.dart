@@ -1104,22 +1104,40 @@ class _DisplayMenuState extends State<_DisplayMenu> {
     return futureBuilder(future: () async {
       final viewStyle =
           await bind.sessionGetViewStyle(sessionId: ffi.sessionId) ?? '';
-      final visible = viewStyle == kRemoteViewStyleOriginal ||
+      final scrollVisible = viewStyle == kRemoteViewStyleOriginal ||
           viewStyle == kRemoteViewStyleCustom;
       final scrollStyle =
           await bind.sessionGetScrollStyle(sessionId: ffi.sessionId) ?? '';
-      final edgeScrollEdgeThickness = await bind
-          .sessionGetEdgeScrollEdgeThickness(sessionId: ffi.sessionId);
+      final edgeScrollEdgeThickness = scrollVisible
+          ? await bind.sessionGetEdgeScrollEdgeThickness(
+              sessionId: ffi.sessionId)
+          : null;
+      await widget.ffi.canvasModel.initializeRemoteCanvasMargin();
       return {
-        'visible': visible,
+        'scrollVisible': scrollVisible,
         'scrollStyle': scrollStyle,
         'edgeScrollEdgeThickness': edgeScrollEdgeThickness,
+        'supportsRemoteCanvasMargin':
+            widget.ffi.canvasModel.supportsRemoteCanvasMargin,
+        'remoteCanvasMargin': widget.ffi.canvasModel.remoteCanvasMargin,
       };
     }(), hasData: (data) {
-      final visible = data['visible'] as bool;
-      if (!visible) return Offstage();
+      final scrollVisible = data['scrollVisible'] as bool;
       final groupValue = data['scrollStyle'] as String;
-      final edgeScrollEdgeThickness = data['edgeScrollEdgeThickness'] as int;
+      final edgeScrollEdgeThickness =
+          ((data['edgeScrollEdgeThickness'] as int?) ??
+                  EdgeThicknessControl.kMin.round())
+              .clamp(EdgeThicknessControl.kMin.round(),
+                  EdgeThicknessControl.kMax.round())
+              .toInt();
+      final supportsRemoteCanvasMargin =
+          data['supportsRemoteCanvasMargin'] as bool;
+      final remoteCanvasMargin = data['remoteCanvasMargin'] as double;
+      final hasVisibleControls = scrollVisible || supportsRemoteCanvasMargin;
+
+      if (!hasVisibleControls) {
+        return SizedBox.shrink();
+      }
 
       onChangeScrollStyle(String? value) async {
         if (value == null) return;
@@ -1138,48 +1156,76 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         state.setState(() {});
       }
 
-      return Obx(() => Column(children: [
-            RdoMenuButton<String>(
-              child: Text(translate('ScrollAuto')),
-              value: kRemoteScrollStyleAuto,
-              groupValue: groupValue,
-              onChanged: widget.ffi.canvasModel.imageOverflow.value
-                  ? (value) => onChangeScrollStyle(value)
-                  : null,
-              closeOnActivate: groupValue != kRemoteScrollStyleEdge,
-              ffi: widget.ffi,
-            ),
-            RdoMenuButton<String>(
-              child: Text(translate('Scrollbar')),
-              value: kRemoteScrollStyleBar,
-              groupValue: groupValue,
-              onChanged: widget.ffi.canvasModel.imageOverflow.value
-                  ? (value) => onChangeScrollStyle(value)
-                  : null,
-              closeOnActivate: groupValue != kRemoteScrollStyleEdge,
-              ffi: widget.ffi,
-            ),
-            if (!isWeb) ...[
-              RdoMenuButton<String>(
-                child: Text(translate('ScrollEdge')),
-                value: kRemoteScrollStyleEdge,
+      onChangeRemoteCanvasMargin(double? value) async {
+        if (value == null) return;
+        await widget.ffi.canvasModel.setRemoteCanvasMargin(value);
+        state.setState(() {});
+      }
+
+      return Column(children: [
+        if (scrollVisible) ...[
+          Obx(() => RdoMenuButton<String>(
+                child: Text(translate('ScrollAuto')),
+                value: kRemoteScrollStyleAuto,
                 groupValue: groupValue,
-                closeOnActivate: false,
                 onChanged: widget.ffi.canvasModel.imageOverflow.value
                     ? (value) => onChangeScrollStyle(value)
                     : null,
+                closeOnActivate: groupValue != kRemoteScrollStyleEdge,
                 ffi: widget.ffi,
-              ),
-              Offstage(
-                  offstage: groupValue != kRemoteScrollStyleEdge,
+              )),
+          Obx(() => RdoMenuButton<String>(
+                child: Text(translate('Scrollbar')),
+                value: kRemoteScrollStyleBar,
+                groupValue: groupValue,
+                onChanged: widget.ffi.canvasModel.imageOverflow.value
+                    ? (value) => onChangeScrollStyle(value)
+                    : null,
+                closeOnActivate: groupValue != kRemoteScrollStyleEdge,
+                ffi: widget.ffi,
+              )),
+          if (!isWeb) ...[
+            Obx(() => RdoMenuButton<String>(
+                  child: Text(translate('ScrollEdge')),
+                  value: kRemoteScrollStyleEdge,
+                  groupValue: groupValue,
+                  closeOnActivate: false,
+                  onChanged: widget.ffi.canvasModel.imageOverflow.value
+                      ? (value) => onChangeScrollStyle(value)
+                      : null,
+                  ffi: widget.ffi,
+                )),
+            Offstage(
+                offstage: groupValue != kRemoteScrollStyleEdge,
+                child: EdgeThicknessControl(
+                  value: edgeScrollEdgeThickness.toDouble(),
+                  onChanged: onChangeEdgeScrollEdgeThickness,
+                  colorScheme: colorScheme,
+                )),
+          ],
+        ],
+        if (supportsRemoteCanvasMargin) ...[
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                Expanded(child: Text(translate('canvas_margin'))),
+                SizedBox(
+                  width: 160,
                   child: EdgeThicknessControl(
-                    value: edgeScrollEdgeThickness.toDouble(),
-                    onChanged: onChangeEdgeScrollEdgeThickness,
+                    value: remoteCanvasMargin,
+                    min: 0,
+                    max: kMaxRemoteCanvasMargin,
+                    onChanged: onChangeRemoteCanvasMargin,
                     colorScheme: colorScheme,
-                  )),
-            ],
-            Divider(),
-          ]));
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        Divider(),
+      ]);
     });
   }
 
@@ -2751,12 +2797,18 @@ class EdgeThicknessControl extends StatelessWidget {
   final double value;
   final ValueChanged<double>? onChanged;
   final ColorScheme? colorScheme;
+  final double min;
+  final double max;
+  final String unit;
 
   const EdgeThicknessControl({
     Key? key,
     required this.value,
     this.onChanged,
     this.colorScheme,
+    this.min = kMin,
+    this.max = kMax,
+    this.unit = 'px',
   }) : super(key: key);
 
   static const double kMin = 20;
@@ -2773,24 +2825,23 @@ class EdgeThicknessControl extends StatelessWidget {
         overlayColor: colorScheme.primary.withOpacity(0.1),
         showValueIndicator: ShowValueIndicator.never,
         thumbShape: _RectValueThumbShape(
-          min: EdgeThicknessControl.kMin,
-          max: EdgeThicknessControl.kMax,
+          min: min,
+          max: max,
           width: 52,
           height: 24,
           radius: 4,
-          unit: 'px',
+          unit: unit,
         ),
       ),
       child: Semantics(
         value: value.toInt().toString(),
         child: Slider(
           value: value,
-          min: EdgeThicknessControl.kMin,
-          max: EdgeThicknessControl.kMax,
-          divisions:
-              (EdgeThicknessControl.kMax - EdgeThicknessControl.kMin).round(),
+          min: min,
+          max: max,
+          divisions: (max - min).round(),
           semanticFormatterCallback: (double newValue) =>
-              "${newValue.round()}px",
+              "${newValue.round()}$unit",
           onChanged: onChanged,
         ),
       ),
